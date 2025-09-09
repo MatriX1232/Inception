@@ -5,13 +5,13 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: /home/idomagal/data/wordpress
+      device: /home/vboxuser/data/wordpress
   mariadb_data:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: /home/idomagal/data/mariadb
+      device: /home/vboxuser/data/mariadb
 
 secrets:
   db_root_pass.txt:
