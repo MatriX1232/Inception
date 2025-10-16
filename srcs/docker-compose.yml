@@ -1,0 +1,68 @@
+version: "3.8"
+
+services:
+  nginx:
+    container_name: nginx
+    build:
+      context: ./requirements/nginx
+      args:
+        DOMAIN_NAME: ${DOMAIN_NAME}
+    ports:
+      - "443:443"
+    env_file:
+      - ./.env
+    volumes:
+      - wp_files:/var/www/html
+    networks:
+      - inception-network
+    depends_on:
+      - wordpress
+    restart: unless-stopped
+
+  mariadb:
+    container_name: mariadb
+    build:
+      context: ./requirements/mariadb
+    env_file:
+      - ./.env
+    volumes:
+      - db_data:/var/lib/mysql
+      - ../secrets/db_password.txt:/run/secrets/db_password:ro
+      - ../secrets/db_root_password.txt:/run/secrets/db_root_password:ro
+    networks:
+      - inception-network
+    restart: unless-stopped
+
+  wordpress:
+    container_name: wordpress
+    build:
+      context: ./requirements/wordpress
+    env_file:
+      - ./.env
+    volumes:
+      - wp_files:/var/www/html
+      - ../secrets/db_password.txt:/run/secrets/db_password:ro
+      - ../secrets/wp_admin_password.txt:/run/secrets/wp_admin_password:ro
+    networks:
+      - inception-network
+    depends_on:
+      - mariadb
+    restart: unless-stopped
+
+networks:
+  inception-network:
+    driver: bridge
+
+volumes:
+  db_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/msolinsk/data/mariadb
+  wp_files:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/msolinsk/data/wordpress
