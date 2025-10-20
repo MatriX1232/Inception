@@ -1,162 +1,140 @@
-# Inception project Makefile (refactored for readability and style)
-# Provides the same targets and behavior as the original Makefile.old
+# Alternative Makefile for the Inception project — same behavior, different structure
 
-# --- Paths & configuration ---
-DC_FILE        := srcs/docker-compose.yml
-WP_PHAR        := srcs/requirements/wordpress/tools/wp-cli.phar
-SECRETS_DIR    := secrets
-DATA_ROOT      := /home/msolinsk/data
+# --- Configurable values (new names) ---
+COMPOSE_YAML := srcs/docker-compose.yml
+WPCLI_FILE := srcs/requirements/wordpress/tools/wpcli.phar
+KEY_STORE := vault
+PERSIST_ROOT := /home/msolinsk/data_store
+ENV_FILE := srcs/.env
 
-# --- Phony targets ---
-.PHONY: all default setup install-docker install-docker-compose download-wp-cli \
-        create-volumes up down clean fclean re purge hosts clean-hosts secrets \
-        _check_docker _install_docker _check_compose _install_compose
+# New host marker
+HOST_MARKER := "# Inception Host Entry"
 
-# default entry -> same as original: run full setup then launch
-all: setup up
+# --- Targets ---
+.PHONY: start prepare install_engine ensure_compose fetch_wp secretize make_storage up down tidy deepclean reset purge_hosts add_host remove_host
 
-# keep make without target friendly
-default: all
+start: prepare up
+	@printf "=> All services requested: started (or were already running)\n"
 
-# --- High-level orchestration ---
-setup: install-docker install-docker-compose download-wp-cli secrets create-volumes hosts
-	@printf "\n=== Setup finished: environment prepared ===\n\n"
+prepare: install_engine ensure_compose fetch_wp secretize make_storage add_host
+	@printf "=> System prepared\n"
 
-# --- Install helpers (refactored into smaller private targets) ---
-install-docker: _check_docker
+# Install Docker if missing (different checks & steps)
+install_engine:
+	@printf "Checking for Docker engine...\n"
+	@bash -c 'if ! hash docker 2>/dev/null; then \
+		printf "Docker missing — adding repo and installing\n"; \
+		sudo apt-get update -y && sudo apt-get install -y apt-transport-https ca-certificates gnupg lsb-release curl; \
+		curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg; \
+		echo "deb [arch=$$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $$(. /etc/os-release && echo $$UBUNTU_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null; \
+		sudo apt-get update -y && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin; \
+		sudo usermod -aG docker $${USER}; \
+		printf "Docker installed. You may need to re-login.\n"; \
+	else printf "Docker already installed\n"; fi'
 
-_check_docker:
-	@printf ">> Checking for Docker executable...\n"
-	@if ! command -v docker >/dev/null 2>&1; then \
-		printf "Docker missing -> invoking installer target...\n"; \
-		$(MAKE) _install_docker; \
-	else \
-		printf "Docker already installed.\n"; \
-	fi
+# Ensure Docker Compose plugin exists (alternate check)
+ensure_compose:
+	@printf "Verifying Docker Compose plugin...\n"
+	@bash -c 'if ! docker compose version >/dev/null 2>&1; then \
+		printf "Compose plugin not available — installing package\n"; \
+		sudo apt-get update -y && sudo apt-get install -y docker-compose-plugin; \
+		printf "Compose plugin installed\n"; \
+	else printf "Compose plugin present\n"; fi'
 
-_install_docker:
-	@printf ">> Installing Docker (apt)...\n"
-	@sudo apt-get update; \
-	sudo apt-get install -y ca-certificates curl gnupg; \
-	sudo install -m 0755 -d /etc/apt/keyrings; \
-	curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg; \
-	sudo chmod a+r /etc/apt/keyrings/docker.gpg; \
-	echo "deb [arch=$$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $$(. /etc/os-release && echo "$$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null; \
-	sudo apt-get update; \
-	sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin; \
-	sudo usermod -aG docker $$USER || true; \
-	printf "Docker install complete. You may need to re-login or run 'newgrp docker'.\n"
-
-install-docker-compose: _check_compose
-
-_check_compose:
-	@printf ">> Verifying Docker Compose plugin...\n"
-	@if ! docker compose version >/dev/null 2>&1; then \
-		printf "Docker Compose plugin not present -> invoking installer target...\n"; \
-		$(MAKE) _install_compose; \
-	else \
-		printf "Docker Compose plugin is installed.\n"; \
-	fi
-
-_install_compose:
-	@printf ">> Installing Docker Compose plugin (apt)...\n"
-	@sudo apt-get update; \
-	sudo apt-get install -y docker-compose-plugin; \
-	printf "Docker Compose plugin installed.\n"
-
-# --- Tools download ---
-download-wp-cli:
-	@printf ">> Ensuring WP-CLI is available at '$(WP_PHAR)'\n"
-	@mkdir -p $$(dirname "$(WP_PHAR)")
-	@if [ ! -f "$(WP_PHAR)" ]; then \
+# Fetch WP-CLI using wget (different tool) and create parent dirs
+fetch_wp:
+	@printf "Ensuring WP-CLI is present...\n"
+	@bash -c 'if [ ! -f "$(WPCLI_FILE)" ]; then \
 		printf "Downloading WP-CLI...\n"; \
-		curl -sSfL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o "$(WP_PHAR)"; \
-		chmod +x "$(WP_PHAR)" || true; \
-		printf "WP-CLI downloaded.\n"; \
-	else \
-		printf "WP-CLI already present.\n"; \
-	fi
+		mkdir -p $$(dirname "$(WPCLI_FILE)"); \
+		wget -q -O "$(WPCLI_FILE)" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x "$(WPCLI_FILE)"; \
+		printf "WP-CLI saved to %s\n" "$(WPCLI_FILE)"; \
+	else printf "WP-CLI already present at %s\n" "$(WPCLI_FILE)"; fi'
 
-# --- Secrets & volumes (consolidated secret creation) ---
-secrets:
-	@printf ">> Creating secrets in '$(SECRETS_DIR)'\n"
-	@mkdir -p "$(SECRETS_DIR)"
-	@for name in db_password db_root_password wp_admin_password; do \
-		file="$(SECRETS_DIR)/$$name.txt"; \
-		if [ ! -f "$$file" ]; then \
-			openssl rand -base64 18 | tr -d '\n' > "$$file"; \
-			printf "Created $$file\n"; \
-		else \
-			printf "$$file exists, skipping\n"; \
-		fi; \
-	done
-	@chmod 600 "$(SECRETS_DIR)"/*.txt 2>/dev/null || true
-	@printf "Secrets prepared.\n"
+# Create secrets directory and generate hex secrets if missing (different naming & method)
+secretize:
+	@printf "Creating secret tokens if absent...\n"
+	@bash -c 'mkdir -p "$(KEY_STORE)"; \
+	for f in db_pw root_db_pw wp_admin_pw; do \
+		fn="$(KEY_STORE)/$${f}.txt"; \
+		if [ ! -f "$$fn" ]; then \
+			openssl rand -hex 16 > "$$fn" && chmod 600 "$$fn" && printf "Generated %s\n" "$$fn"; \
+		else printf "Skipping existing %s\n" "$$fn"; fi; \
+	done'
 
-create-volumes:
-	@printf ">> Creating persistent volume directories under $(DATA_ROOT)\n"
-	@mkdir -p "$(DATA_ROOT)/mariadb" "$(DATA_ROOT)/wordpress"
-	@printf "Volume directories ready: $(DATA_ROOT)/{mariadb,wordpress}\n"
+# Prepare persistent directories (different names)
+make_storage:
+	@printf "Making persistent storage under %s\n" "$(PERSIST_ROOT)"
+	@mkdir -p "$(PERSIST_ROOT)/mariadb" "$(PERSIST_ROOT)/wordpress"
+	@chmod 755 "$(PERSIST_ROOT)" || true
 
-# --- Docker lifecycle ---
+# Start stack using docker compose (explicit -f)
 up:
-	@printf ">> Building and launching containers (docker compose)...\n"
-	@docker compose -f "$(DC_FILE)" up --build -d
-	@printf "-------------------------------------------------\n"
-	@printf "Containers are up.\n"
-	@docker compose -f "$(DC_FILE)" ps
+	@printf "Bringing up containers (build + detach)...\n"
+	@docker compose -f "$(COMPOSE_YAML)" up --build -d
+	@docker compose -f "$(COMPOSE_YAML)" ps
 
 down:
-	@printf ">> Bringing containers down...\n"
-	@docker compose -f "$(DC_FILE)" down
-	@printf "Services stopped.\n"
+	@printf "Stopping stack...\n"
+	@docker compose -f "$(COMPOSE_YAML)" down
 
-clean: down
+tidy: down
+	@printf "Tidying: stopped services\n"
 
-fclean: clean-hosts
-	@printf ">> Full cleanup: removing images, volumes, tools and local data\n"
-	@docker compose -f "$(DC_FILE)" down --rmi all -v
-	@rm -f "$(WP_PHAR)" || true
-	@rm -rf "$(SECRETS_DIR)" || true
-	@rm -rf "$(DATA_ROOT)" || true
-	@printf "Full cleanup completed.\n"
+deepclean: tidy
+	@printf "Full cleanup: removing images, volumes, tools and secrets\n"
+	@docker compose -f "$(COMPOSE_YAML)" down --rmi all -v || true
+	@rm -f "$(WPCLI_FILE)" || true
+	@rm -rf "$(KEY_STORE)" || true
+	@rm -rf "$(PERSIST_ROOT)" || true
+	@printf "Cleanup complete\n"
 
-re: fclean all
+reset: deepclean add_host
+	@printf "Rebuilding from scratch...\n"
+	$(MAKE) prepare
+	$(MAKE) up
 
-purge: fclean clean-hosts
-	@printf ">> Purging Docker system (containers/images/volumes/networks/build cache)\n"
-	@-sudo docker stop $$(sudo docker ps -qa) 2>/dev/null || true
-	@-sudo docker rm $$(sudo docker ps -qa) 2>/dev/null || true
-	@-sudo docker rmi -f $$(sudo docker images -qa) 2>/dev/null || true
-	@-sudo docker volume rm $$(sudo docker volume ls -q) 2>/dev/null || true
-	@-sudo docker network rm $$(sudo docker network ls -q) 2>/dev/null || true
-	@-sudo docker builder prune -a -f 2>/dev/null || true
-	@-sudo docker network prune -f 2>/dev/null || true
-	@-sudo systemctl restart docker 2>/dev/null || true
-	@-sudo rm -rf "$(SECRETS_DIR)" 2>/dev/null || true
-	@printf "Docker system purge finished.\n"
+# Purge: try to remove all docker artifacts safely (different commands)
+purge:
+	@printf "Attempting to purge Docker resources (requires sudo)...\n"
+	@sudo systemctl stop docker || true
+	@-sudo docker ps -aq | xargs -r sudo docker rm -f || true
+	@-sudo docker images -aq | xargs -r sudo docker rmi -f || true
+	@-sudo docker volume ls -q | xargs -r sudo docker volume rm || true
+	@-sudo docker network ls -q | xargs -r sudo docker network rm || true
+	@sudo systemctl start docker || true
+	@printf "Purge finished\n"
 
-# --- Hosts file helpers ---
-hosts:
-	@printf ">> Ensuring /etc/hosts contains the Inception domain entry\n"
-	@SUDO=""; if [ "$$(id -u)" -ne 0 ]; then SUDO="sudo"; fi; \
-	VM_IP=$$(hostname -I 2>/dev/null | awk '{print $$1}'); \
-	DOMAIN_NAME=$$(grep -E '^DOMAIN_NAME=' srcs/.env 2>/dev/null | cut -d'=' -f2); \
+# Hosts management (different marker and flow)
+add_host:
+	@echo "Configuring /etc/hosts file..."
+	@if [ "$$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi; \
+	VM_IP=$$(hostname -I | awk '{print $$1}'); \
+	DOMAIN_NAME=$$(grep DOMAIN_NAME srcs/.env | cut -d '=' -f2); \
 	COMMENT="# Inception Project Host"; \
-	if [ -z "$$VM_IP" ]; then \
-		printf "Could not determine VM IP (hostname -I failed). Skipping hosts entry.\n"; \
-	elif [ -z "$$DOMAIN_NAME" ]; then \
-		printf "DOMAIN_NAME not found in srcs/.env. Skipping hosts entry.\n"; \
-	elif grep -qF "$$DOMAIN_NAME" /etc/hosts 2>/dev/null; then \
-		printf "Hosts entry for $$DOMAIN_NAME already present.\n"; \
+	HOSTS_ENTRY="$$VM_IP $$DOMAIN_NAME $$COMMENT"; \
+	if grep -q "$$DOMAIN_NAME" /etc/hosts; then \
+		echo "Entry for '$$DOMAIN_NAME' already exists in /etc/hosts."; \
 	else \
-		printf "$$VM_IP $$DOMAIN_NAME $$COMMENT\n" | $$SUDO tee -a /etc/hosts > /dev/null; \
-		printf "Added hosts entry for $$DOMAIN_NAME -> $$VM_IP\n"; \
+		echo "Adding entry to /etc/hosts. Sudo password may be required."; \
+		echo "$$HOSTS_ENTRY" | $$SUDO tee -a /etc/hosts > /dev/null; \
+		echo "Host entry added successfully."; \
 	fi
 
-clean-hosts:
-	@printf ">> Removing Inception hosts entry (if present)\n"
-	@SUDO=""; if [ "$$(id -u)" -ne 0 ]; then SUDO="sudo"; fi; \
+remove_host:
+	@echo "Removing Inception host entry from /etc/hosts..."
+	@if [ "$$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi; \
 	COMMENT="# Inception Project Host"; \
-	if grep -qF "$$COMMENT" /etc/hosts 2>/dev/null; then \
-		$$SUDO sed -i.bak "/$$COMMENT/d" /etc/hosts && printf "Removed Inception hosts entry (backup /etc/hosts.bak created).\n"; \
+	if grep -q "$$COMMENT" /etc/hosts; then \
+		echo "Found entry. Sudo password may be required to remove it."; \
+		$$SUDO sed -i "/$$COMMENT/d" /etc/hosts; \
+		echo "Host entry removed."; \
+	else \
+		echo "No Inception host entry found to remove."; \
+	fi
+
+# Convenience alias
+clean: tidy
+
+fclean: deepclean remove_host
+	@printf "Performed full clean + host removal\n"
