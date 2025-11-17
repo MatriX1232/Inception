@@ -1,28 +1,49 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root. Use sudo." >&2
-  exit 1
-fi
+ensure_root() {
+	(( EUID == 0 )) || {
+		printf 'Root privileges required. Please rerun with sudo.\n' >&2
+		exit 1
+	}
+}
 
-DOMAIN_NAME=${DOMAIN_NAME:-localhost}
-CERT_DIR="/etc/ssl/private"
+resolve_domain() {
+	: "${DOMAIN_NAME:=localhost}"
+	printf '%s\n' "$DOMAIN_NAME"
+}
 
-mkdir -p "$CERT_DIR"
+prepare_target() {
+	local dir=$1
+	mkdir -p "$dir"
+	printf '%s\n' "$dir"
+}
 
-KEY_FILE="$CERT_DIR/nginx-selfsigned.key"
-CERT_FILE="$CERT_DIR/nginx-selfsigned.crt"
+create_pair() {
+	local domain=$1
+	local folder=$2
+	local key="$folder/nginx-selfsigned.key"
+	local cert="$folder/nginx-selfsigned.crt"
 
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout "$KEY_FILE" \
-  -out "$CERT_FILE" \
-  -subj "/C=US/ST=State/L=City/0=42/OU=student/CN=$DOMAIN_NAME"
+	openssl req \
+		-x509 \
+		-nodes \
+		-newkey rsa:2048 \
+		-days 365 \
+		-keyout "$key" \
+		-out "$cert" \
+		-subj "/C=US/ST=State/L=City/O=42/OU=student/CN=${domain}"
 
-# Restrict permissions: private key readable only by root
-chmod 600 "$KEY_FILE" || true
-chmod 644 "$CERT_FILE" || true
+	printf 'Certificate ready for %s\nKey: %s\nCert: %s\n' "$domain" "$key" "$cert"
+}
 
-echo "SSL Certificate and Key generated:"
-echo "Key: $KEY_FILE"
-echo "CERTIFICATE: $CERT_FILE"
+main() {
+	ensure_root
+	local domain
+	domain=$(resolve_domain)
+	local location
+	location=$(prepare_target "/etc/ssl/private")
+	create_pair "$domain" "$location"
+}
+
+main "$@"

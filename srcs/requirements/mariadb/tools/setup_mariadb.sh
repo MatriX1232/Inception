@@ -1,61 +1,47 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-if [ -f "/run/secrets/db_password" ]; then
-    DB_PASS=$(cat /run/secrets/db_password)
-fi
+secret_or_exit() {
+	local path="$1" label="$2"
+	if [[ -f "$path" ]]; then
+		cat "$path"
+	else
+		printf "Missing required secret: %s\n" "$label" >&2
+		exit 1
+	fi
+}
 
-if [ -f "/run/secrets/db_root_password" ]; then
-    DB_ROOT_PASS=$(cat /run/secrets/db_root_password)
-fi
+DB_PASS="${DB_PASS:-$(secret_or_exit /run/secrets/db_password db_password)}"
+DB_ROOT_PASS="${DB_ROOT_PASS:-$(secret_or_exit /run/secrets/db_root_password db_root_password)}"
 
 service mariadb start
 
-# Wait for MariaDB to become responsive (timeout after ~30s)
-wait_for_mariadb() {
-    local tries=0
-    local max=30
-    while true; do
-        if [ -z "${DB_ROOT_PASS:-}" ]; then
-            mysqladmin ping >/dev/null 2>&1 && return 0 || true
-        else
-            mysqladmin ping -u root -p"${DB_ROOT_PASS}" >/dev/null 2>&1 && return 0 || true
-        fi
-        tries=$((tries + 1))
-        if [ "$tries" -ge "$max" ]; then
-            echo "Timed out waiting for MariaDB to start"
-            return 1
-        fi
-        sleep 1
-    done
-}
+for attempt in {1..15}; do
+	if mysqladmin ping --silent >/dev/null 2>&1; then
+		break
+	fi
+	sleep 1
+	if [[ $attempt -eq 15 ]]; then
+		printf "MariaDB did not become ready in time.\n" >&2
+		exit 1
+	fi
+done
 
-wait_for_mariadb
+db_exists=$(mysql -uroot -e "SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${DB_NAME}'" 2>/dev/null | tail -n +2 || true)
 
-if ! mysql -u root -e "SHOW DATABASES;" | grep -q "$DB_NAME"; then
-    echo "Database '$DB_NAME' not found. Creating and configuring..."
+if [[ -z "$db_exists" ]]; then
+	printf "Initializing secure configuration and provisioning '%s'.\n" "$DB_NAME"
 
-    # Run mysql_secure_installation with provided root password
-    mysql_secure_installation <<EOF
+	printf "\ny\n%s\n%s\ny\ny\ny\ny\n" "$DB_ROOT_PASS" "$DB_ROOT_PASS" | mysql_secure_installation
 
-y
-${DB_ROOT_PASS}
-${DB_ROOT_PASS}
-y
-y
-y
-y
-EOF
-
-    # Create the database and user with credentials from .env
-    mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
-    mysql -u root -p"${DB_ROOT_PASS}" -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';"
-    mysql -u root -p"${DB_ROOT_PASS}" -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';"
-    mysql -u root -p"${DB_ROOT_PASS}" -e "FLUSH PRIVILEGES;"
-
-    echo "Database and user created successfully."
+	mysql -uroot -p"${DB_ROOT_PASS}" <<SQL
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';
+FLUSH PRIVILEGES;
+SQL
 else
-    echo "Database '$DB_NAME' already exists. Skipping setup."
+	printf "Schema '%s' already present; skipping creation.\n" "$DB_NAME"
 fi
 
 service mariadb stop

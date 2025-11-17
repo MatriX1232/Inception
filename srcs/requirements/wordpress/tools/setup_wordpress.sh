@@ -1,59 +1,65 @@
 #!/bin/bash
+set -euo pipefail
 
-# Read DB password from Docker secret or env
-DB_PASSWORD="${DB_PASSWORD:-}"
-if [ -f "/run/secrets/db_password" ]; then
-    DB_PASSWORD="$(cat /run/secrets/db_password)"
-fi
+read_secret() {
+    local secret_path=$1
+    [[ -f "$secret_path" ]] && cat "$secret_path"
+}
 
-# Read WP admin password from Docker secret or env, fallback to DB password
-if [ -f "/run/secrets/wp_admin_password" ]; then
-    WP_ADMIN_PASSWORD="$(cat /run/secrets/wp_admin_password)"
-else
-    WP_ADMIN_PASSWORD="${WP_ADMIN_PASSWORD:-$DB_PASSWORD}"
-fi
+DB_PASS=${DB_PASS:-$(read_secret /run/secrets/db_password || true)}
+WP_ADMIN_PASS=${WP_ADMIN_PASS:-$(read_secret /run/secrets/wp_admin_password || true)}
+WP_ADMIN_PASS=${WP_ADMIN_PASS:-$DB_PASS}
 
-# DB host (default to the mariadb service)
-DB_HOST="${DB_HOST:-mariadb}"
+wait_for_database() {
+    until mysql -h mariadb -u "${DB_USER}" -p"${DB_PASS}" -e "SELECT 1" >/dev/null 2>&1; do
+        echo "Awaiting MariaDB availability..."
+        sleep 2
+    done
+    echo "MariaDB connection established."
+}
 
-# Wait for MariaDB to be ready
-until mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASSWORD" -e "USE $DB_NAME" 2>/dev/null; do
-    echo "Waiting for MariaDB at ${DB_HOST}..."
-    sleep 2
-done
-echo "MariaDB is ready."
+prepare_runtime() {
+    mkdir -p /run/php
+}
 
-mkdir -p /run/php
+bootstrap_wordpress() {
+    if [[ ! -f /var/www/html/wp-config.php ]]; then
+        echo "Initializing WordPress..."
+        wp core download --allow-root
+        wp config create \
+            --dbname="${DB_NAME}" \
+            --dbuser="${DB_USER}" \
+            --dbpass="${DB_PASS}" \
+            --dbhost="mariadb" \
+            --allow-root
+        wp core install \
+            --url="https://${DOMAIN_NAME}" \
+            --title="My Inception Project" \
+            --admin_user="${WP_ADMIN_USER}" \
+            --admin_password="${WP_ADMIN_PASS}" \
+            --admin_email="user@example.com" \
+            --skip-email \
+            --allow-root
+        echo "WordPress setup complete."
+    else
+        echo "Existing WordPress installation detected; skipping bootstrap."
+    fi
+}
 
-if [ ! -f "/var/www/html/wp-config.php" ]; then
-    echo "WordPress not found. Installing now..."
+fix_permissions() {
+    echo "Applying ownership and permissions..."
+    chown -R www-data:www-data /var/www/html
+    find /var/www/html -type d -exec chmod 755 {} \;
+    find /var/www/html -type f -exec chmod 644 {} \;
+    echo "Ownership and permissions applied."
+}
 
-    wp core download --allow-root
+main() {
+    wait_for_database
+    prepare_runtime
+    bootstrap_wordpress
+    fix_permissions
+    exec "$@"
+}
 
-    wp config create --dbname="$DB_NAME" \
-                     --dbuser="$DB_USER" \
-                     --dbpass="$DB_PASS" \
-                     --dbhost="mariadb" \
-                     --allow-root
-
-    # Install WordPress with HTTPS protocol
-    wp core install --url="https://$DOMAIN_NAME" \
-                    --title="My Inception Project" \
-                    --admin_user="$WP_ADMIN_USER" \
-                    --admin_password="$WP_ADMIN_PASS" \
-                    --admin_email="user@example.com" \
-                    --skip-email \
-                    --allow-root
-
-    echo "WordPress installed successfully."
-else
-    echo "WordPress is already installed."
-fi
-
-echo "Setting file permissions..."
-chown -R www-data:www-data /var/www/html
-find /var/www/html -type d -exec chmod 755 {} \;
-find /var/www/html -type f -exec chmod 644 {} \;
-echo "Permissions set."
-
-exec "$@"
+main "$@"
